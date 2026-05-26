@@ -1,0 +1,73 @@
+name: Update Pi Version
+
+on:
+  schedule:
+    # Check every Monday at 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # --- Determine latest pi version from earendil-works/pi releases ---
+      - name: Get latest release tag
+        id: latest-release
+        run: |
+          TAG=$(gh api repos/earendil-works/pi/releases/latest --jq '.tag_name')
+          if [ -z "$TAG" ]; then
+            echo "Failed to fetch latest release from earendil-works/pi"
+            exit 1
+          fi
+          echo "Latest tag: $TAG"
+          # Strip leading 'v' for comparison (e.g. "v0.75.6" -> "0.75.6")
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # --- Compare with current version in Dockerfile ---
+      - name: Check if update needed
+        id: check
+        run: |
+          CURRENT=$(grep -oP '(?<=ARG PI_VERSION=)\S+' Dockerfile)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Current PI_VERSION: $CURRENT"
+          LATEST="${{ steps.latest-release.outputs.version }}"
+
+          if [ "$CURRENT" = "$LATEST" ]; then
+            echo "Already up to date ($CURRENT). Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Update needed: $CURRENT -> $LATEST"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create PR with updated version
+        if: steps.check.outputs.skip == 'false'
+        env:
+          CURRENT_VERSION: "${{ steps.check.outputs.current }}"
+          LATEST_VERSION: "${{ steps.latest-release.outputs.version }}"
+        run: |
+          BRANCH="update/pi-version-${{ steps.latest-release.outputs.version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          sed -i "s/ARG PI_VERSION=.*/ARG PI_VERSION=$LATEST_VERSION/" Dockerfile
+
+          git add Dockerfile
+          git commit -m "chore: update PI_VERSION to $LATEST_VERSION"
+
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "chore: update pi-coding-agent to v$LATEST_VERSION" \
+            --body "Auto-updated \`PI_VERSION\` in \`Dockerfile\` from **$CURRENT_VERSION** to **$LATEST_VERSION** (latest earendil-works/pi release)." \
+            --base main
