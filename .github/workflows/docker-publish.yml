@@ -4,13 +4,7 @@ on:
   push:
     tags:
       - "v*"
-  # Also support manual trigger with optional tag override
   workflow_dispatch:
-    inputs:
-      pi_tag:
-        description: "Pi release tag (e.g. v0.75.5). Leave empty to auto-fetch latest."
-        required: false
-        default: ""
 
 env:
   REGISTRY: ghcr.io
@@ -26,28 +20,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Determine the pi version to bake into the image
-      - name: Determine PI_VERSION
-        id: pi-version
-        run: |
-          if [ -n "${{ github.event.inputs.pi_tag }}" ]; then
-            TAG="${{ github.event.inputs.pi_tag }}"
-          else
-            TAG=$(curl -sL https://api.github.com/repos/earendil-works/pi/releases/latest \
-              | grep '"tag_name"' \
-              | head -1 \
-              | sed -E 's/.*"([^"]+)".*/\1/')
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          # Strip leading 'v' for the build arg (bun/npm version tags)
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved pi version: $TAG (build arg: $VERSION)"
+        uses: actions/checkout@v6
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -55,20 +31,13 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.pi-version.outputs.version }}
-            type=raw,value=latest
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
-          context: .
-          file: ${{ env.DOCKERFILE_PATH }}
-          build-args: |
-            PI_VERSION=${{ steps.pi-version.outputs.version }}
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

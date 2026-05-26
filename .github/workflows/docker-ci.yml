@@ -16,9 +16,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run docker build
         uses: docker/build-push-action@v7
         with:
-          load: true
+          load: false
+          push: false
