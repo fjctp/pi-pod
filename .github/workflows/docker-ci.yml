@@ -21,11 +21,4 @@ jobs:
       - name: Run docker build
         uses: docker/build-push-action@v7
         with:
-          push: false
           load: true
-
-      - name: Inspect built image
-        run: |
-          IMAGE_ID=$(docker inspect --format='{{.Id}}' "$(docker images -q)" 2>/dev/null)
-          echo "Build successful. Image ID: $IMAGE_ID"
-          docker inspect --format='{{json .Config.Env}}' "$(docker images -q)"
