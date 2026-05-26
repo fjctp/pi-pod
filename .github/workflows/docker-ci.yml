@@ -8,9 +8,6 @@ on:
     branches:
       - main
 
-env:
-  DOCKERFILE_PATH: ./output/Dockerfile
-
 jobs:
   build-test:
     runs-on: ubuntu-latest
@@ -21,25 +18,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Determine the pi version to bake into the image
-      - name: Determine PI_VERSION
-        id: pi-version
-        run: |
-          TAG=$(curl -sL https://api.github.com/repos/earendil-works/pi/releases/latest \
-            | grep '"tag_name"' \
-            | head -1 \
-            | sed -E 's/.*"([^"]+)".*/\1/')
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved pi version: $TAG (build arg: $VERSION)"
-
       - name: Run docker build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
-          context: .
-          file: ${{ env.DOCKERFILE_PATH }}
-          build-args: |
-            PI_VERSION=${{ steps.pi-version.outputs.version }}
           push: false
           load: true
 
