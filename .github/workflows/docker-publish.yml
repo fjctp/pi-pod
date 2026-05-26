@@ -9,7 +9,6 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  DOCKERFILE_PATH: ./output/Dockerfile
 
 jobs:
   build-and-push:
@@ -19,9 +18,6 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
       - name: Log in to Container Registry
         uses: docker/login-action@v4
         with:
