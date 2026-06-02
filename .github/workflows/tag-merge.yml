@@ -1,0 +1,56 @@
+name: Auto-tag on PR Merge
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write   # push tags
+
+jobs:
+  tag-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version from PR title
+        id: extract
+        run: |
+          VERSION=$(echo "${{ github.event.pull_request.title }}" | grep -oP 'v\d+\.\d+\.\d+' | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "No version (vX.YY.Z) found in PR title: ${{ github.event.pull_request.title }}"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Extracted version: $VERSION"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag main branch
+        if: steps.extract.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+
+          # Find the merge commit sha on main
+          MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          if [ -z "$MERGE_SHA" ]; then
+            MERGE_SHA=$(git rev-parse main)
+            echo "No merge commit sha, using main HEAD: $MERGE_SHA"
+          else
+            echo "Using merge commit sha: $MERGE_SHA"
+          fi
+
+          # Create annotated tag on main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" "$MERGE_SHA" \
+            -m "Release $VERSION"
+
+          # Push the tag
+          git push origin "$VERSION"
+          echo "Tagged main as $VERSION at commit $MERGE_SHA"
+
+      - name: Skip notification
+        if: steps.extract.outputs.skip == 'true'
+        run: echo "Skipped tagging — no version found in PR title."
