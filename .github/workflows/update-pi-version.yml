@@ -20,6 +20,8 @@ jobs:
       # --- Determine latest pi version from earendil-works/pi releases ---
       - name: Get latest release tag
         id: latest-release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           TAG=$(gh api repos/earendil-works/pi/releases/latest --jq '.tag_name')
           if [ -z "$TAG" ]; then
@@ -51,6 +53,7 @@ jobs:
       - name: Create PR with updated version
         if: steps.check.outputs.skip == 'false'
         env:
+          GH_TOKEN: ${{ github.token }}
           CURRENT_VERSION: "${{ steps.check.outputs.current }}"
           LATEST_VERSION: "${{ steps.latest-release.outputs.version }}"
         run: |
