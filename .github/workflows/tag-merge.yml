@@ -24,6 +24,12 @@ jobs:
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+          
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
 
       - name: Tag main branch
         if: steps.extract.outputs.skip == 'false'
