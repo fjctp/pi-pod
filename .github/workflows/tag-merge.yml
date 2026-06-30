@@ -30,6 +30,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
+          persist-credentials: false
 
       - name: Tag main branch
         if: steps.extract.outputs.skip == 'false'
