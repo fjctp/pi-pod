@@ -34,7 +34,7 @@ jobs:
       - name: Tag main branch
         if: steps.extract.outputs.skip == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           VERSION="${{ steps.extract.outputs.version }}"
 
@@ -54,6 +54,7 @@ jobs:
             -m "Release $VERSION"
 
           # Push the tag
+          git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
           git push origin "$VERSION"
           echo "Tagged main as $VERSION at commit $MERGE_SHA"
 
