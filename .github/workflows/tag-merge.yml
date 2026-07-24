@@ -5,7 +5,7 @@ on:
     types: [closed]
 
 permissions:
-  contents: write   # push tags
+  contents: write   # allow pushing tags with GITHUB_TOKEN
 
 jobs:
   tag-release:
@@ -24,18 +24,16 @@ jobs:
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          
-      - name: Checkout repository
+
+      - name: Checkout repository (for tagging)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
-          persist-credentials: false
+          persist-credentials: true   # allow git push via GITHUB_TOKEN
 
       - name: Tag main branch
         if: steps.extract.outputs.skip == 'false'
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           VERSION="${{ steps.extract.outputs.version }}"
 
@@ -48,16 +46,16 @@ jobs:
             echo "Using merge commit sha: $MERGE_SHA"
           fi
 
-          # Create annotated tag on main
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" "$MERGE_SHA" \
-            -m "Release $VERSION"
+          git tag -a "$VERSION" "$MERGE_SHA" -m "Release $VERSION"
 
-          # Push the tag
-          git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
+          # Push the tag using the checked-out token (GITHUB_TOKEN)
           git push origin "$VERSION"
           echo "Tagged main as $VERSION at commit $MERGE_SHA"
+
+          # Remove injected auth header so the token is no longer usable by subsequent git commands
+          git config --unset-all http.https://github.com/.extraheader || true
 
       - name: Skip notification
         if: steps.extract.outputs.skip == 'true'
