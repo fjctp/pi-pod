@@ -2,7 +2,7 @@ FROM docker.io/oven/bun:1.3.13-alpine
 
 # Use default user: bun:bun (1000:1000).
 ARG USER_NAME=bun
-ARG PI_VERSION=0.84.2
+ARG PI_VERSION=0.84.4
 
 # Define variables
 ENV HOME_DIR="/home/${USER_NAME}"
