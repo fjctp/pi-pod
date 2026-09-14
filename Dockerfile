@@ -16,6 +16,7 @@ RUN mkdir -p ${WORK_DIR} ${PI_BIN_DIR} ${PI_CFG_DIR} \
 
 # Install tools
 RUN apk add --no-cache \
+  npm \
   bash \
   git \
   curl \
