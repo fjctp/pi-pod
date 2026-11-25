@@ -2,7 +2,7 @@ name: Docker Release
 
 on:
   schedule:
-    # Daily at 07:00 and 19:00 PST (UTC-8); 08:00 and 20:00 during PDT (UTC-7)
+    # Daily at 7:00 AM and 7:00 PM PST (cron uses UTC)
     - cron: "0 3,15 * * *"
   push:
     branches:
