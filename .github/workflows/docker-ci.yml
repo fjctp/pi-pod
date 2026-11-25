@@ -1,25 +1,77 @@
-name: Docker CI — Build Test
+name: Docker CI
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
+  workflow_call:
+    inputs:
+      pi_version:
+        description: "Optional PI_VERSION build-arg override"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
 
 jobs:
-  build-test:
+  build-and-test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Run docker build
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Resolve PI_VERSION
+        id: version
+        env:
+          INPUT_PI_VERSION: ${{ inputs.pi_version }}
+        run: |
+          if [ -n "$INPUT_PI_VERSION" ]; then
+            PI_VERSION="$INPUT_PI_VERSION"
+          else
+            PI_VERSION=$(grep -oP '(?<=^ARG PI_VERSION=)\S+' Dockerfile)
+          fi
+          if [ -z "$PI_VERSION" ]; then
+            echo "Failed to resolve PI_VERSION"
+            exit 1
+          fi
+          echo "pi_version=$PI_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Testing PI_VERSION=$PI_VERSION"
+
+      - name: Build Docker image (no push)
         uses: docker/build-push-action@v7
         with:
-          load: false
+          context: .
+          load: true
           push: false
+          tags: pi-pod:ci-test
+          build-args: |
+            PI_VERSION=${{ steps.version.outputs.pi_version }}
+          cache-from: type=gha
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max' || '' }}
+
+      - name: Smoke test image
+        env:
+          PI_VERSION: ${{ steps.version.outputs.pi_version }}
+        run: |
+          echo "Running pi --version..."
+          OUTPUT=$(docker run --rm pi-pod:ci-test --version)
+          echo "pi --version output: $OUTPUT"
+          if ! echo "$OUTPUT" | grep -Fq "$PI_VERSION"; then
+            echo "Expected pi --version output to contain '$PI_VERSION'"
+            exit 1
+          fi
+
+          echo "Checking bundled tools..."
+          docker run --rm --entrypoint bash pi-pod:ci-test -c '
+            set -e
+            git --version
+            curl --version | head -n 1
+            rg --version | head -n 1
+            fd --version
+            npm --version
+          '

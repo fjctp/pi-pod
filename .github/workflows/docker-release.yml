@@ -1,0 +1,298 @@
+name: Docker Release
+
+on:
+  schedule:
+    # Daily at 07:00 and 19:00 PST (UTC-8); 08:00 and 20:00 during PDT (UTC-7)
+    - cron: "0 3,15 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - .dockerignore
+  workflow_dispatch:
+    inputs:
+      check_upstream:
+        description: "Check upstream earendil-works/pi for a newer release (false = rebuild/publish current Dockerfile)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: docker-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      mode: ${{ steps.decide.outputs.mode }}
+      current_version: ${{ steps.decide.outputs.current_version }}
+      target_version: ${{ steps.decide.outputs.target_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Determine release plan
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CHECK_UPSTREAM: ${{ inputs.check_upstream }}
+        run: |
+          CURRENT=$(grep -oP '(?<=^ARG PI_VERSION=)\S+' Dockerfile)
+          if [ -z "$CURRENT" ]; then
+            echo "Failed to read ARG PI_VERSION from Dockerfile"
+            exit 1
+          fi
+          echo "current_version=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Current PI_VERSION in Dockerfile: $CURRENT"
+
+          if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$CHECK_UPSTREAM" = "true" ]; }; then
+            if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+              echo "check_upstream=true must be run from the main branch (got ${GITHUB_REF})"
+              exit 1
+            fi
+            TAG=$(gh api repos/earendil-works/pi/releases/latest --jq '.tag_name')
+            if [ -z "$TAG" ]; then
+              echo "Failed to fetch latest release from earendil-works/pi"
+              exit 1
+            fi
+            LATEST="${TAG#v}"
+            echo "Latest upstream release: $TAG ($LATEST)"
+
+            if [ "$CURRENT" = "$LATEST" ]; then
+              echo "Already up to date ($CURRENT). Skipping."
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if git ls-remote --exit-code --tags origin "refs/tags/v${LATEST}" >/dev/null 2>&1; then
+              echo "Tag v${LATEST} already exists (possibly reverted). Skipping automatic update."
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Update needed: $CURRENT -> $LATEST"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "mode=upstream_update" >> "$GITHUB_OUTPUT"
+            echo "target_version=$LATEST" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publish mode for current Dockerfile PI_VERSION=$CURRENT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "mode=publish" >> "$GITHUB_OUTPUT"
+            echo "target_version=$CURRENT" >> "$GITHUB_OUTPUT"
+          fi
+
+  ci:
+    needs: plan
+    if: needs.plan.outputs.should_run == 'true'
+    uses: ./.github/workflows/docker-ci.yml
+    with:
+      pi_version: ${{ needs.plan.outputs.target_version }}
+
+  release:
+    needs: [plan, ci]
+    if: needs.plan.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+      MODE: ${{ needs.plan.outputs.mode }}
+      CURRENT_VERSION: ${{ needs.plan.outputs.current_version }}
+      TARGET_VERSION: ${{ needs.plan.outputs.target_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream release notes
+        run: |
+          UPSTREAM_URL="https://github.com/earendil-works/pi/releases/tag/v${TARGET_VERSION}"
+          if gh api "repos/earendil-works/pi/releases/tags/v${TARGET_VERSION}" --jq '.body // ""' > /tmp/raw-upstream-notes.md 2>/dev/null && [ -s /tmp/raw-upstream-notes.md ]; then
+            if [ "$(wc -c < /tmp/raw-upstream-notes.md)" -gt 55000 ]; then
+              head -c 55000 /tmp/raw-upstream-notes.md > /tmp/upstream-notes.md
+              printf '\n\n---\n*(Release notes truncated; see full notes at %s)*\n' "$UPSTREAM_URL" >> /tmp/upstream-notes.md
+            else
+              cp /tmp/raw-upstream-notes.md /tmp/upstream-notes.md
+            fi
+          else
+            printf 'See upstream release: %s\n' "$UPSTREAM_URL" > /tmp/upstream-notes.md
+          fi
+
+      - name: Create and auto-merge version bump PR
+        if: env.MODE == 'upstream_update'
+        run: |
+          BRANCH="chore/update-pi-version"
+          UPSTREAM_URL="https://github.com/earendil-works/pi/releases/tag/v${TARGET_VERSION}"
+          PR_TITLE="chore: update PI_VERSION to ${TARGET_VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          git checkout -B "$BRANCH" origin/main
+          sed -i "s/^ARG PI_VERSION=.*/ARG PI_VERSION=${TARGET_VERSION}/" Dockerfile
+          grep -q "^ARG PI_VERSION=${TARGET_VERSION}$" Dockerfile
+
+          git add Dockerfile
+          git commit -m "$PR_TITLE"
+          git push --force origin "$BRANCH"
+
+          {
+            echo "Auto-updated \`PI_VERSION\` in \`Dockerfile\` from **${CURRENT_VERSION}** to **${TARGET_VERSION}** (upstream release [earendil-works/pi v${TARGET_VERSION}](${UPSTREAM_URL}))."
+            echo ""
+            echo "## Upstream Release Notes"
+            echo ""
+            cat /tmp/upstream-notes.md
+          } > /tmp/pr-body.md
+
+          PR_NUMBER=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // ""')
+          if [ -n "$PR_NUMBER" ]; then
+            echo "Updating existing PR #${PR_NUMBER}..."
+            gh pr edit "$PR_NUMBER" --title "$PR_TITLE" --body-file /tmp/pr-body.md
+          else
+            echo "Creating new PR..."
+            PR_URL=$(gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "$PR_TITLE" \
+              --body-file /tmp/pr-body.md | tail -n 1)
+            echo "Created PR: $PR_URL"
+            PR_NUMBER="${PR_URL##*/}"
+          fi
+
+          echo "Auto-merging PR #${PR_NUMBER}..."
+          MERGED=false
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge "$PR_NUMBER" --squash --delete-branch; then
+              MERGED=true
+              break
+            fi
+            echo "Merge attempt ${attempt} failed; retrying in 5s..."
+            sleep 5
+          done
+
+          if [ "$MERGED" != "true" ]; then
+            echo "Failed to auto-merge PR #${PR_NUMBER}"
+            exit 1
+          fi
+
+          MERGE_SHA=$(gh pr view "$PR_NUMBER" --json mergeCommit --jq '.mergeCommit.oid')
+          if [ -z "$MERGE_SHA" ]; then
+            echo "Failed to retrieve merge commit SHA for PR #${PR_NUMBER}"
+            exit 1
+          fi
+          echo "Merged PR #${PR_NUMBER} at ${MERGE_SHA}"
+
+          git fetch origin main
+          git checkout "$MERGE_SHA"
+
+      - name: Compute Docker metadata
+        id: meta
+        run: |
+          RELEASE_SHA=$(git rev-parse HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          IMAGE="${REGISTRY}/${IMAGE_NAME,,}"
+          CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          UPDATE_LATEST="false"
+          if [ "$MODE" = "upstream_update" ] || [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            UPDATE_LATEST="true"
+          fi
+
+          echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:v${TARGET_VERSION}"
+            echo "${IMAGE}:${TARGET_VERSION}"
+            echo "${IMAGE}:sha-${SHORT_SHA}"
+            if [ "$UPDATE_LATEST" = "true" ]; then
+              echo "${IMAGE}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "labels<<EOF"
+            echo "org.opencontainers.image.title=pi-pod"
+            echo "org.opencontainers.image.description=Docker image for pi-coding-agent"
+            echo "org.opencontainers.image.source=https://github.com/${IMAGE_NAME}"
+            echo "org.opencontainers.image.version=${TARGET_VERSION}"
+            echo "org.opencontainers.image.revision=${RELEASE_SHA}"
+            echo "org.opencontainers.image.created=${CREATED}"
+            echo "org.opencontainers.image.licenses=MIT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PI_VERSION=${{ needs.plan.outputs.target_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create git tag and GitHub Release
+        run: |
+          TAG="v${TARGET_VERSION}"
+          RELEASE_SHA="${{ steps.meta.outputs.sha }}"
+          IMAGE="${{ steps.meta.outputs.image }}"
+          UPSTREAM_URL="https://github.com/earendil-works/pi/releases/tag/${TAG}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists on origin; skipping tag and release creation."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$RELEASE_SHA" -m "Release ${TAG}"
+          git push origin "$TAG"
+          echo "Created and pushed tag ${TAG} at ${RELEASE_SHA}"
+
+          {
+            echo "## Docker Image"
+            echo ""
+            echo '```bash'
+            echo "docker pull ${IMAGE}:${TAG}"
+            echo '```'
+            echo ""
+            echo "Built from [earendil-works/pi ${TAG}](${UPSTREAM_URL})."
+            echo ""
+            echo "## Upstream Release Notes"
+            echo ""
+            cat /tmp/upstream-notes.md
+          } > /tmp/release-notes.md
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/release-notes.md
