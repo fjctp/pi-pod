@@ -33,7 +33,7 @@ jobs:
           if [ -n "$INPUT_PI_VERSION" ]; then
             PI_VERSION="$INPUT_PI_VERSION"
           else
-            PI_VERSION=$(grep -oP '(?<=^ARG PI_VERSION=)\S+' Dockerfile)
+            PI_VERSION=$(sed -n 's/^ARG PI_VERSION=\([^[:space:]]*\).*/\1/p' Dockerfile | head -n 1)
           fi
           if [ -z "$PI_VERSION" ]; then
             echo "Failed to resolve PI_VERSION"

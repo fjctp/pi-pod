@@ -35,9 +35,14 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     outputs:
+      # Used by: ci, release (if:). When 'true', triggers both jobs; when 'false', skips them.
       should_run: ${{ steps.decide.outputs.should_run }}
+      # Used by: release (MODE). 'upstream_update' triggers PR creation/auto-merge and updates :latest;
+      # 'publish' skips PR creation and builds/publishes the checked-out Dockerfile directly.
       mode: ${{ steps.decide.outputs.mode }}
+      # Used by: release (CURRENT_VERSION). Included in the version-bump PR description.
       current_version: ${{ steps.decide.outputs.current_version }}
+      # Used by: ci (inputs.pi_version) and release (TARGET_VERSION). Version to build, tag, and release.
       target_version: ${{ steps.decide.outputs.target_version }}
     steps:
       - name: Checkout repository
@@ -49,7 +54,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           CHECK_UPSTREAM: ${{ inputs.check_upstream }}
         run: |
-          CURRENT=$(grep -oP '(?<=^ARG PI_VERSION=)\S+' Dockerfile)
+          CURRENT=$(sed -n 's/^ARG PI_VERSION=\([^[:space:]]*\).*/\1/p' Dockerfile | head -n 1)
           if [ -z "$CURRENT" ]; then
             echo "Failed to read ARG PI_VERSION from Dockerfile"
             exit 1
@@ -57,6 +62,7 @@ jobs:
           echo "current_version=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "Current PI_VERSION in Dockerfile: $CURRENT"
 
+          # Scheduled runs always check upstream; workflow_dispatch only checks when check_upstream=true
           if [ "$EVENT_NAME" = "schedule" ] || { [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$CHECK_UPSTREAM" = "true" ]; }; then
             if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
               echo "check_upstream=true must be run from the main branch (got ${GITHUB_REF})"
@@ -127,26 +133,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch upstream release notes
-        run: |
-          UPSTREAM_URL="https://github.com/earendil-works/pi/releases/tag/v${TARGET_VERSION}"
-          if gh api "repos/earendil-works/pi/releases/tags/v${TARGET_VERSION}" --jq '.body // ""' > /tmp/raw-upstream-notes.md 2>/dev/null && [ -s /tmp/raw-upstream-notes.md ]; then
-            if [ "$(wc -c < /tmp/raw-upstream-notes.md)" -gt 55000 ]; then
-              head -c 55000 /tmp/raw-upstream-notes.md > /tmp/upstream-notes.md
-              printf '\n\n---\n*(Release notes truncated; see full notes at %s)*\n' "$UPSTREAM_URL" >> /tmp/upstream-notes.md
-            else
-              cp /tmp/raw-upstream-notes.md /tmp/upstream-notes.md
-            fi
-          else
-            printf 'See upstream release: %s\n' "$UPSTREAM_URL" > /tmp/upstream-notes.md
-          fi
-
       - name: Create and auto-merge version bump PR
         if: env.MODE == 'upstream_update'
         run: |
-          BRANCH="chore/update-pi-version"
+          BRANCH="chore/update-pi-version-${TARGET_VERSION}"
           UPSTREAM_URL="https://github.com/earendil-works/pi/releases/tag/v${TARGET_VERSION}"
           PR_TITLE="chore: update PI_VERSION to ${TARGET_VERSION}"
+          PR_BODY=$(cat <<EOF
+          Auto-updated \`PI_VERSION\` in \`Dockerfile\` from **${CURRENT_VERSION}** to **${TARGET_VERSION}**.
+
+          Upstream release notes: ${UPSTREAM_URL}
+          EOF
+          )
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -160,25 +158,17 @@ jobs:
           git commit -m "$PR_TITLE"
           git push --force origin "$BRANCH"
 
-          {
-            echo "Auto-updated \`PI_VERSION\` in \`Dockerfile\` from **${CURRENT_VERSION}** to **${TARGET_VERSION}** (upstream release [earendil-works/pi v${TARGET_VERSION}](${UPSTREAM_URL}))."
-            echo ""
-            echo "## Upstream Release Notes"
-            echo ""
-            cat /tmp/upstream-notes.md
-          } > /tmp/pr-body.md
-
           PR_NUMBER=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // ""')
           if [ -n "$PR_NUMBER" ]; then
             echo "Updating existing PR #${PR_NUMBER}..."
-            gh pr edit "$PR_NUMBER" --title "$PR_TITLE" --body-file /tmp/pr-body.md
+            gh pr edit "$PR_NUMBER" --title "$PR_TITLE" --body "$PR_BODY"
           else
             echo "Creating new PR..."
             PR_URL=$(gh pr create \
               --base main \
               --head "$BRANCH" \
               --title "$PR_TITLE" \
-              --body-file /tmp/pr-body.md | tail -n 1)
+              --body "$PR_BODY" | tail -n 1)
             echo "Created PR: $PR_URL"
             PR_NUMBER="${PR_URL##*/}"
           fi
@@ -222,9 +212,11 @@ jobs:
             UPDATE_LATEST="true"
           fi
 
+          # Step outputs:
+          # - sha: used by 'Create git tag and GitHub Release' to tag the exact built commit.
+          # - tags: used by 'Build and push Docker image' for GHCR image tags.
+          # - labels: used by 'Build and push Docker image' for OCI metadata (links image to repo on GHCR).
           echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
           {
             echo "tags<<EOF"
@@ -275,8 +267,6 @@ jobs:
         run: |
           TAG="v${TARGET_VERSION}"
           RELEASE_SHA="${{ steps.meta.outputs.sha }}"
-          IMAGE="${{ steps.meta.outputs.image }}"
-          UPSTREAM_URL="https://github.com/earendil-works/pi/releases/tag/${TAG}"
 
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "Tag ${TAG} already exists on origin; skipping tag and release creation."
@@ -289,20 +279,6 @@ jobs:
           git push origin "$TAG"
           echo "Created and pushed tag ${TAG} at ${RELEASE_SHA}"
 
-          {
-            echo "## Docker Image"
-            echo ""
-            echo '```bash'
-            echo "docker pull ${IMAGE}:${TAG}"
-            echo '```'
-            echo ""
-            echo "Built from [earendil-works/pi ${TAG}](${UPSTREAM_URL})."
-            echo ""
-            echo "## Upstream Release Notes"
-            echo ""
-            cat /tmp/upstream-notes.md
-          } > /tmp/release-notes.md
-
           gh release create "$TAG" \
             --title "$TAG" \
-            --notes-file /tmp/release-notes.md
+            --generate-notes
