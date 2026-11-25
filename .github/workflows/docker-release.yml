@@ -26,6 +26,9 @@ permissions:
   contents: read
 
 jobs:
+  # Determines whether a build/release is needed and which PI_VERSION to target.
+  # On schedule (or manual upstream check), compares Dockerfile against the latest
+  # earendil-works/pi release; on push/manual rebuild, targets the current Dockerfile version.
   plan:
     runs-on: ubuntu-latest
     env:
@@ -89,6 +92,8 @@ jobs:
             echo "target_version=$CURRENT" >> "$GITHUB_OUTPUT"
           fi
 
+  # Runs the reusable Docker CI workflow (build + smoke test, no push) for the target version.
+  # Acts as a gate so nothing is merged, pushed, or tagged if the image fails validation.
   ci:
     needs: plan
     if: needs.plan.outputs.should_run == 'true'
@@ -96,6 +101,8 @@ jobs:
     with:
       pi_version: ${{ needs.plan.outputs.target_version }}
 
+  # After CI passes: opens and squash-merges the version-bump PR (for upstream updates),
+  # builds and pushes the image to GHCR, and creates the git tag + GitHub Release if new.
   release:
     needs: [plan, ci]
     if: needs.plan.outputs.should_run == 'true'
